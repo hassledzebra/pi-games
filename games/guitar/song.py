@@ -30,16 +30,53 @@ class Note:
         return "Note(%d, %.3f-%.3f, s%s f%s)" % (self.midi, self.start, self.end, self.string, self.fret)
 
 
+class Strum:
+    """One strum of a chord: when, which direction, and the voicing (low to high)."""
+    __slots__ = ("time", "up", "midis", "chord")
+
+    def __init__(self, time, up, midis, chord):
+        self.time, self.up, self.midis, self.chord = float(time), bool(up), tuple(midis), chord
+
+    def __repr__(self):
+        return "Strum(%s %.3f %s)" % (self.chord, self.time, "up" if self.up else "down")
+
+
+class Chord:
+    """A chord the player holds from ``start`` to ``end``, strummed at ``strums``."""
+    __slots__ = ("name", "start", "end", "strums")
+
+    def __init__(self, name, start, end):
+        self.name, self.start, self.end, self.strums = name, float(start), float(end), []
+
+    @property
+    def midis(self):
+        return self.strums[0].midis if self.strums else ()
+
+    def __repr__(self):
+        return "Chord(%s %.2f-%.2f, %d strums)" % (self.name, self.start, self.end, len(self.strums))
+
+
 class Song:
     def __init__(self, title, notes, bpm=120.0, artist="", path=None, backing=None, midi_path=None,
-                 guitar_track=0, beats_per_bar=4, offset=0.0):
+                 guitar_track=0, beats_per_bar=4, offset=0.0, chords=None):
         self.title, self.artist, self.bpm = title, artist, bpm
         self.notes = sorted(notes, key=lambda n: (n.start, n.midi))
+        self.chords = chords or []
         self.path, self.backing, self.midi_path = path, backing, midi_path
         self.guitar_track, self.beats_per_bar, self.offset = guitar_track, beats_per_bar, offset
 
     @property
+    def is_chords(self):
+        return bool(self.chords)
+
+    @property
+    def strums(self):
+        return [st for ch in self.chords for st in ch.strums]
+
+    @property
     def duration(self):
+        if self.chords:
+            return max(ch.end for ch in self.chords)
         return max((n.end for n in self.notes), default=0.0)
 
     @property
@@ -126,14 +163,62 @@ def guess_guitar_track(mid):
     return candidates[0]
 
 
+CHORD_TRACK = "Chords"      # a player part of strummed chords; markers "chord:Am" name them
+STRUM_GAP = 0.06            # note-ons closer than this belong to one strum
+
+
+def chord_markers(mid, index, secs):
+    """[(time, name)] from 'chord:NAME' marker/text events in a track."""
+    out, tick = [], 0
+    for m in mid.tracks[index]:
+        tick += m.time
+        if m.type in ("marker", "text") and m.text.startswith("chord:"):
+            out.append((secs(tick), m.text[6:].strip()))
+    return out
+
+
+def load_chords(mid, index, secs):
+    """Strum events of the chord track grouped under their chord markers."""
+    raw = sorted(track_notes(mid, index), key=lambda r: r[1])
+    strums = []
+    for midi, s, e, vel, ch in raw:
+        t = secs(s)
+        if strums and t - strums[-1][-1][0] < STRUM_GAP:
+            strums[-1].append((t, midi))
+        else:
+            strums.append([(t, midi)])
+    markers = chord_markers(mid, index, secs)
+    if not markers:
+        return []
+    chords = []
+    for k, (t, name) in enumerate(markers):
+        end = markers[k + 1][0] if k + 1 < len(markers) else max(secs(e) for _, _, e, _, _ in raw)
+        chords.append(Chord(name, t, end))
+    for group in strums:
+        t0 = group[0][0]
+        chord = max((c for c in chords if c.start <= t0 + 0.02), key=lambda c: c.start, default=chords[0])
+        order = [m for _, m in group]
+        up = len(order) > 1 and order[0] > order[-1]
+        chord.strums.append(Strum(t0, up, sorted(order), chord.name))
+    return [c for c in chords if c.strums]
+
+
 def load_midi(path, track=None, title=None):
     mid = mido.MidiFile(path)
+    tempos = _tempo_map(mid)
+    secs = _tick_to_seconds(tempos, mid.ticks_per_beat)
+    chord_track = next((i for i, t in enumerate(mid.tracks)
+                        if any(m.type == "track_name" and m.name == CHORD_TRACK for m in t)), None)
+    if chord_track is not None and track is None:
+        chords = load_chords(mid, chord_track, secs)
+        beats = next((m.numerator for t in mid.tracks for m in t if m.type == "time_signature"), 4)
+        name = title or os.path.splitext(os.path.basename(path))[0].replace("_", " ")
+        return Song(name, [], bpm=60e6 / tempos[0][1], path=path, midi_path=path, guitar_track=chord_track,
+                    beats_per_bar=beats, chords=chords)
     if track is None:
         track = guess_guitar_track(mid)
     if track is None:
         raise ValueError("%s has no note tracks" % path)
-    tempos = _tempo_map(mid)
-    secs = _tick_to_seconds(tempos, mid.ticks_per_beat)
     raw = track_notes(mid, track)
     by_channel = channels_are_strings(raw)
     notes = []

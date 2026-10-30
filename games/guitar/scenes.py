@@ -14,7 +14,9 @@ from . import backing
 from .curriculum import EXERCISES, STAGES, PATH_DIR
 from .progress import STARS_TO_UNLOCK, Progress
 from .pitch import PitchFrame, PitchTracker, midi_to_freq, note_name
-from .scoring import HIT, MISS, PENDING, Judge
+from .chords import template
+from .curriculum import voicing
+from .scoring import HIT, MISS, PENDING, ChordJudge, Judge
 from .song import find_songs, load_song
 
 WIDTH, HEIGHT = 640, 360
@@ -31,6 +33,44 @@ GREEN, RED, GOLD = (90, 230, 120), (240, 80, 80), (255, 210, 60)
 
 def lane_y(string):
     return LANE_TOP + (5 - string) * LANE_GAP
+
+
+CHORD_COLORS = [(90, 160, 240), (240, 150, 60), (90, 210, 110), (235, 90, 90), (190, 110, 240), (235, 220, 70), (80, 200, 200)]
+
+
+def chord_color(name, names):
+    return CHORD_COLORS[names.index(name) % len(CHORD_COLORS)] if name in names else GREY
+
+
+def draw_chord_diagram(surface, name, x, y, w=78, h=96, color=WHITE):
+    """A chord box: 6 strings, 4 frets, dots on the fretted notes, o/x above open/muted strings."""
+    try:
+        shape = voicing(name)
+    except KeyError:
+        return
+    frets = [f for _, f in shape]
+    base = 1 if max(frets, default=1) <= 4 else max(1, min(f for f in frets if f) )
+    sx = w / 5.0
+    sy = (h - 22) / 4.0
+    top = y + 20
+    text.draw(surface, name, 22, color, (x + w // 2, y - 4))
+    pygame.draw.rect(surface, GREY if base == 1 else DIM, (x, top - 2, w + 1, 3))
+    for k in range(5):
+        pygame.draw.line(surface, DIM, (x, int(top + k * sy)), (x + w, int(top + k * sy)))
+    for k in range(6):
+        pygame.draw.line(surface, GREY, (int(x + k * sx), top), (int(x + k * sx), int(top + 4 * sy)))
+    fretted = {st: f for st, f in shape}
+    for st in range(6):
+        cx = int(x + st * sx)
+        if st not in fretted:
+            text.draw(surface, "x", 14, RED, (cx, top - 16), shadow=None)
+        elif fretted[st] == 0:
+            pygame.draw.circle(surface, GREY, (cx, top - 9), 4, 1)
+        else:
+            cy = int(top + (fretted[st] - base + 0.5) * sy)
+            pygame.draw.circle(surface, color, (cx, cy), 6)
+    if base > 1:
+        text.draw(surface, "%dfr" % base, 12, GREY, (x + w + 6, top), align="left")
 
 
 class Ear:
@@ -75,6 +115,9 @@ class Ear:
                 continue
             for fr in self.tracker.feed(samples, t_end):
                 self.frames.put(fr)
+
+    def listen_for_chords(self, on):
+        self.tracker.chords = bool(on)
 
     def poll(self):
         """PitchFrames analysed since the last call (oldest first)."""
@@ -262,7 +305,18 @@ class PlayScene(Scene):
         if ex is not None:
             self.song.title = ex.title
         self.notes = self.song.notes
-        self.judge = Judge(self.notes)
+        self.chords = self.song.is_chords
+        if self.chords:
+            if self.speed < 0.999:
+                for ch in self.song.chords:
+                    ch.start, ch.end = ch.start / self.speed, ch.end / self.speed
+                    for st in ch.strums:
+                        st.time /= self.speed
+            self.chord_names = sorted({c.name for c in self.song.chords})
+            self.judge = ChordJudge(self.song)
+        else:
+            self.judge = Judge(self.notes)
+        self.ear.listen_for_chords(self.chords)
         self.count_in = self.song.beat * self.song.beats_per_bar * self.COUNT_IN_BARS
         self.metronome = app.settings.get("metronome", True)
         self.backing = None
@@ -286,8 +340,10 @@ class PlayScene(Scene):
         self.backing_started = False
         self.flash = None
         self.end_time = self.song.duration + 1.5
-        self.demo_next = 0           # demo mode: index of the next note to "play"
+        self.demo_next = 0           # demo mode: index of the next note/strum to "play"
         self.demo_last = None
+        self.demo_chroma_until = -1e9
+        self.demo_chord = None
 
     # ------------------------------------------------------------ control
     def handle_event(self, event):
@@ -359,6 +415,8 @@ class PlayScene(Scene):
     def _demo_frames(self):
         """Pretend a flawless player: synthesise pitch frames from the song itself."""
         t = self.song_time
+        if self.chords:
+            return self._demo_chord_frames(t)
         notes = self.notes
         midi = None
         while self.demo_next < len(notes) and notes[self.demo_next].end < t - 0.05:
@@ -380,11 +438,28 @@ class PlayScene(Scene):
         self.ear.tracker.levels = [fr.db]
         return [fr]
 
+    def _demo_chord_frames(self, t):
+        strums = self.song.strums
+        onset, chroma = False, None
+        if self.demo_next < len(strums) and strums[self.demo_next].time + 0.01 <= t:
+            onset = True
+            self.demo_chord = strums[self.demo_next].chord
+            self.demo_chroma_until = t + 0.25
+            self.demo_next += 1
+        if self.demo_chord and t <= self.demo_chroma_until and not onset:
+            chroma = template(self.demo_chord)
+        fr = PitchFrame(t, 0.0, 0.0, -20.0 if t <= self.demo_chroma_until else -80.0, onset, chroma)
+        self.ear.tracker.levels = [fr.db]
+        return [fr]
+
     # ------------------------------------------------------------ draw
     def draw(self, surface):
         surface.fill(BG)
         t = self.song_time
         self._draw_header(surface)
+        if self.chords:
+            self._draw_chords(surface, t)
+            return
         # lanes
         for s in range(6):
             y = lane_y(s)
@@ -429,6 +504,82 @@ class PlayScene(Scene):
         draw_tuner(surface, self.ear.tracker, 300, self.ear.live or self.demo)
         if self.demo:
             text.draw(surface, "DEMO", 16, GOLD, (WIDTH - 10, 306), align="right")
+
+    def _draw_chords(self, surface, t):
+        """Chord blocks scroll along one lane; strum arrows below them; the chord to hold now is
+        drawn big on the left, the next one small beside it."""
+        beat = self.song.beat
+        lane_top, lane_h, strum_y = 150, 44, 222
+        now_x = NOW_X + 90
+        cur = next((c for c in self.song.chords if c.start <= t < c.end), None)
+        nxt = next((c for c in self.song.chords if c.start > t), None)
+        if cur:
+            draw_chord_diagram(surface, cur.name, 14, 70, color=chord_color(cur.name, self.chord_names))
+        elif nxt:
+            draw_chord_diagram(surface, nxt.name, 14, 70, color=chord_color(nxt.name, self.chord_names))
+        if nxt and cur:
+            text.draw(surface, "next", 12, GREY, (120, 64))
+            draw_chord_diagram(surface, nxt.name, 108, 86, w=44, h=60, color=chord_color(nxt.name, self.chord_names))
+        # beat grid
+        first = math.floor((t - (now_x - 170) / PPS) / beat)
+        for b in range(first, first + int(WIDTH / PPS / beat) + 2):
+            x = now_x + int((b * beat - t) * PPS)
+            if 170 <= x < WIDTH:
+                bar = b % self.song.beats_per_bar == 0
+                pygame.draw.line(surface, (50, 55, 70) if bar else (34, 38, 50), (x, lane_top - 10), (x, strum_y + 22))
+        # chord blocks
+        for c in self.song.chords:
+            x0, x1 = now_x + (c.start - t) * PPS, now_x + (c.end - t) * PPS
+            if x1 < 170 or x0 > WIDTH:
+                continue
+            col = chord_color(c.name, self.chord_names)
+            left = max(170, int(x0))
+            pygame.draw.rect(surface, tuple(v // 3 for v in col), (left, lane_top, int(x1) - left - 2, lane_h), border_radius=6)
+            pygame.draw.rect(surface, col, (left, lane_top, int(x1) - left - 2, lane_h), width=2, border_radius=6)
+            if int(x0) >= 170:
+                text.draw(surface, c.name, 26, col, (int(x0) + 10, lane_top + 10), align="left")
+        # strums
+        for i, st in enumerate(self.song.strums):
+            x = now_x + (st.time - t) * PPS
+            if x < 170 or x > WIDTH:
+                continue
+            state = self.judge.state[i]
+            col = GREEN if state == HIT else RED if state == MISS else WHITE
+            x = int(x)
+            if st.up:
+                pygame.draw.polygon(surface, col, [(x - 6, strum_y + 14), (x + 6, strum_y + 14), (x, strum_y + 2)])
+            else:
+                pygame.draw.polygon(surface, col, [(x - 6, strum_y + 2), (x + 6, strum_y + 2), (x, strum_y + 14)])
+        pygame.draw.line(surface, WHITE, (now_x, lane_top - 14), (now_x, strum_y + 24), 2)
+        text.draw(surface, "strum", 12, GREY, (174, strum_y + 2), align="left")
+        if self.flash and t - self.flash[0] < 0.35:
+            _, i, verdict = self.flash
+            text.draw(surface, "HIT" if verdict == HIT else "MISS", 20, GREEN if verdict == HIT else RED, (now_x + 30, lane_top - 30))
+        if t < 0:
+            text.draw(surface, str(int(-t / beat) + 1), 64, GOLD, (WIDTH // 2 + 60, 100))
+        if self.paused:
+            text.draw(surface, "PAUSED - Space to resume", 28, GOLD, (WIDTH // 2, HEIGHT // 2 - 20))
+        self._draw_chord_tuner(surface)
+        if self.demo:
+            text.draw(surface, "DEMO", 16, GOLD, (WIDTH - 10, 306), align="right")
+
+    def _draw_chord_tuner(self, surface):
+        y = 300
+        pygame.draw.rect(surface, PANEL, (0, y, WIDTH, HEIGHT - y))
+        if not (self.ear.live or self.demo):
+            text.draw(surface, "NO AUDIO INPUT - plug in the USB interface, or watch the demo", 16, GREY, (WIDTH // 2, y + 22))
+            return
+        name, score = self.judge.heard
+        if name:
+            col = GREEN if score >= 0.6 else GOLD if score >= 0.45 else GREY
+            text.draw(surface, "heard: %s  (%d%% match)" % (name, round(score * 100)), 24, col, (WIDTH // 2, y + 14))
+        else:
+            text.draw(surface, "strum the chord shown on the left", 18, GREY, (WIDTH // 2, y + 18))
+        db = self.ear.tracker.levels[-1] if self.ear.tracker.levels else -90.0
+        lvl = max(0.0, min(1.0, (db + 60.0) / 60.0))
+        pygame.draw.rect(surface, DIM, (20, y + 30, 100, 6))
+        pygame.draw.rect(surface, GREEN if db < -6 else RED, (20, y + 30, int(100 * lvl), 6))
+        text.draw(surface, "input", 14, GREY, (20, y + 12), align="left")
 
     def _draw_header(self, surface):
         pygame.draw.rect(surface, PANEL, (0, 0, WIDTH, 40))
@@ -480,7 +631,8 @@ class ResultScene(Scene):
         for k in range(5):
             pygame.draw.circle(surface, GOLD if k < j.stars() else DIM, (WIDTH // 2 - 100 + k * 50, 90), 18)
         text.draw(surface, "%d%%  accuracy" % round(j.accuracy * 100), 36, GOLD, (WIDTH // 2, 125))
-        lines = ["score %d" % j.score, "hit %d   missed %d   of %d notes" % (j.hits, j.misses, len(j.notes)),
+        what = "strums" if self.song.is_chords else "notes"
+        lines = ["score %d" % j.score, "hit %d   missed %d   of %d %s" % (j.hits, j.misses, len(j.notes), what),
                  "best combo %d" % j.best_combo]
         mean, spread = j.timing_stats()
         if j.hits:

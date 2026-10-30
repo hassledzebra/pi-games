@@ -70,6 +70,10 @@ def main(argv=None):
         paths = list(curriculum.write_all(args.songs).values()) + find_songs(args.songs)
         for p in paths:
             s = load_song(p)
+            custom = os.path.splitext(s.midi_path)[0] + ".arranged.wav"
+            if os.path.exists(custom):                  # a jam track was installed over the arrangement
+                print("%-30s %s" % (s.title, "(custom backing kept)"))
+                continue
             out = backing.ensure_backing(s, force=True)
             print("%-30s %s" % (s.title, os.path.basename(out) if out else "(no accompaniment)"))
         return

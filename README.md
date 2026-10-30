@@ -204,16 +204,20 @@ plus the usual `--windowed`, `--fullscreen`, `--mute`, `--fps`.
 Keys: **Left/Right** stage, **Up/Down** exercise, **Enter** play, **-/+** practice speed (50-100%),
 **Space** pause, **R** restart, **M** metronome, **Esc** back.
 
-**The learning path** has six stages, 21 exercises, each with a one-line tip:
+**The learning path** has nine stages and 35 exercises, each with a one-line tip. Chord stages
+show a chord diagram and strum arrows; the band plays the tune while you strum.
 
 | Stage | What you learn | Exercises |
 |---|---|---|
 | 1 Open strings | clean picking on the beat | Open Strings, String Pairs, String Skips |
 | 2 First frets | one finger per fret | First Frets, Chromatic Warm-up, Spider Walk |
-| 3 First tunes | melodies on the top strings | Mary Had a Little Lamb, Twinkle Twinkle, Ode to Joy, Jingle Bells, Happy Birthday |
-| 4 Scales | positions, even notes, eighth notes | C Major, G Major, E Minor Pentatonic, A Minor Pentatonic Box |
-| 5 Riffs and rhythm | low strings, drums, rests | Power Riff in E, Blues Shuffle in A, E Minor Groove |
-| 6 Classics | longer, faster, higher frets | Greensleeves, Minuet in G, Fur Elise |
+| 3 First chords | Em, Am, D, G, C and clean changes | Em and Am; D and G; G, C and D Changes; Em Am D G |
+| 4 First tunes | melodies on the top strings | Mary Had a Little Lamb, Twinkle Twinkle, Ode to Joy, Jingle Bells, Happy Birthday |
+| 5 Strumming | patterns and progressions | Down Down-Up, The Pop Pattern, 12-Bar Blues, Waltz Strum |
+| 6 Scales | positions, even notes, eighth notes | C Major, G Major, E Minor Pentatonic, A Minor Pentatonic Box |
+| 7 Chord songs | strum while the band plays the tune | Twinkle Twinkle, Ode to Joy, Jingle Bells, Happy Birthday, Greensleeves, House of the Rising Sun |
+| 8 Riffs and rhythm | low strings, drums, rests | Power Riff in E, Blues Shuffle in A, E Minor Groove |
+| 9 Classics | longer, faster, higher frets | Greensleeves, Minuet in G, Fur Elise |
 
 A stage unlocks when every exercise of the previous one has at least 2 stars at full speed
 (`--unlock-all` opens everything and is remembered; `--lock` reverts). Slower practice speeds re-render the backing track at that tempo;
@@ -239,7 +243,20 @@ If a MIDI track puts each string on its own channel (0 = low E, as Guitar Pro ex
 **How it works:** `games/guitar/pitch.py` runs the YIN pitch algorithm in numpy on 46 ms frames every
 11.6 ms (about 3 cents accurate on guitar tones) and detects plucks from level jumps.
 `scoring.py` counts a note as hit when the right pitch is heard and the pluck landed within 120 ms
-before to 250 ms after the note start; repeated notes need separate plucks. `tests/test_guitar.py`
+before to 250 ms after the note start; repeated notes need separate plucks. For chords,
+`chords.py` folds the spectrum of a 186 ms window into a 12-bin chroma and compares it with the
+expected chord's template; a strum is hit when a pluck lands in its window and the chroma matches
+the expected chord better than the other chords in the exercise.
+
+**Backing tracks** are rendered from the exercise MIDI with the free GeneralUser GS soundfont
+(downloaded into `soundfonts/` on first run) through the `tinysoundfont` package, or FluidSynth
+if installed; a built-in synth is the last fallback. `games/guitar/curriculum.py` arranges drums,
+bass and rhythm guitar per style. `tools/jam_track.py` (PC/Mac only, needs PyTorch) generates an AI
+jam track with MusicGen and installs it as an exercise's backing.
+
+**Open resources** the chord path follows: the University of Kansas *Guitar Chord Handbook*
+(CC BY-NC) and *Chord Progression Handbook* (CC BY), and the Wikibooks *Guitar* book (CC BY-SA).
+All tunes are traditional or public domain. `tests/test_guitar.py`
 checks all of this headlessly and writes screenshots to `tests/out/`.
 
 ## Project layout

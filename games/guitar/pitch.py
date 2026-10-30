@@ -75,15 +75,16 @@ def yin(x, rate=RATE, fmin=FMIN, fmax=FMAX, threshold=0.15):
 
 
 class PitchFrame:
-    __slots__ = ("time", "freq", "midi", "conf", "db", "onset")
+    __slots__ = ("time", "freq", "midi", "conf", "db", "onset", "chroma")
 
-    def __init__(self, t, freq, conf, db, onset):
+    def __init__(self, t, freq, conf, db, onset, chroma=None):
         self.time = t
         self.freq = freq
         self.midi = freq_to_midi(freq) if freq > 0 else None
         self.conf = conf
         self.db = db
         self.onset = onset
+        self.chroma = chroma          # 12-bin pitch-class energy, only on frames after a strum
 
 
 class PitchTracker:
@@ -99,6 +100,9 @@ class PitchTracker:
         self.gate_db, self.conf_min = gate_db, conf_min
         self.onset_db, self.onset_gap = onset_db, onset_gap
         self.buf = np.zeros(frame, dtype=np.float64)
+        self.long = np.zeros(8192, dtype=np.float64)     # longer window for chord chroma (186 ms)
+        self.chords = False                               # set True to compute chroma after onsets
+        self.analyser = None
         self.pending = np.zeros(0, dtype=np.float64)
         self.levels = []            # recent dB levels (one per hop) for onset detection
         self.last_onset = -1.0
@@ -117,6 +121,9 @@ class PitchTracker:
             block = self.pending[k * self.hop:(k + 1) * self.hop]
             self.buf = np.roll(self.buf, -self.hop)
             self.buf[-self.hop:] = block
+            if self.chords:
+                self.long = np.roll(self.long, -self.hop)
+                self.long[-self.hop:] = block
             t = t_end - (total - (k + 1) * self.hop) / self.rate
             out.append(self._analyse(t))
         self.pending = self.pending[total:]
@@ -139,7 +146,13 @@ class PitchTracker:
             freq, conf = yin(self.buf, self.rate)
             if conf < self.conf_min:
                 freq = 0.0
-        fr = PitchFrame(t, freq, conf, db, onset)
+        chroma = None
+        if self.chords and db > self.gate_db and 0.19 <= t - self.last_onset <= 0.45:   # window fully after the strum
+            if self.analyser is None:
+                from .chords import ChromaAnalyser
+                self.analyser = ChromaAnalyser(self.rate, len(self.long))
+            chroma = self.analyser.chroma(self.long)
+        fr = PitchFrame(t, freq, conf, db, onset, chroma)
         self.history.append(fr.midi)
         if len(self.history) > 3:
             self.history.pop(0)
