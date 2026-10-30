@@ -78,6 +78,12 @@ def main(argv=None):
     from .scenes import HEIGHT, WIDTH, Ear, TitleScene
 
     app = App("Pi Strum", (WIDTH, HEIGHT), fullscreen=on_pi() if args.fullscreen is None else args.fullscreen)
+    if not args.mute and pygame.mixer.get_init():           # the engine opens 22 kHz mono; music wants stereo 44.1 kHz
+        pygame.mixer.quit()
+        try:
+            pygame.mixer.init(44100, -16, 2, 1024)
+        except pygame.error:
+            pygame.mixer.init(22050, -16, 1, 512)
     app.show_fps = args.fps
     app.settings["songs_dir"] = args.songs
     app.settings["song"] = os.path.abspath(args.song) if args.song else None

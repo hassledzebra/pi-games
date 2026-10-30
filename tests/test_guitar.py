@@ -205,7 +205,9 @@ def test_backing(songs):
     import wave
     with wave.open(wav) as w:
         secs = w.getnframes() / w.getframerate()
-        assert w.getnchannels() == 1 and w.getsampwidth() == 2
+        assert w.getnchannels() in (1, 2) and w.getsampwidth() == 2 and w.getframerate() == backing.RATE
+        pcm = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+    assert 20000 < int(np.abs(pcm).max()) <= 32767, "backing should be normalised, peak %d" % int(np.abs(pcm).max())
     assert ode.duration - 0.5 < secs < ode.duration + 5, (secs, ode.duration)
     assert backing.ensure_backing(songs["1-1"], force=True) is None
     slow = backing.ensure_backing(ode, force=True, speed=0.7)
@@ -213,8 +215,9 @@ def test_backing(songs):
     with wave.open(slow) as w:
         slow_secs = w.getnframes() / w.getframerate()
     assert abs(slow_secs - secs / 0.7) < 2.0, (slow_secs, secs)
-    print("backing ok: %s (%.1f s, rendered in %.2f s, soundfont=%s)" % (os.path.basename(wav), secs,
-                                                                           time.perf_counter() - t0, backing.find_soundfont()))
+    how = backing.render_backing(ode.midi_path, wav, ode.guitar_track)
+    print("backing ok: %s (%.1f s, rendered in %.2f s, %s, soundfont=%s)" % (os.path.basename(wav), secs,
+                                                                               time.perf_counter() - t0, how, backing.find_soundfont()))
 
 
 def test_screens(folder):

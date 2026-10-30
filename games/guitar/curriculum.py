@@ -6,17 +6,24 @@ number (0 = low E), which the loader understands. Tunes are traditional or publi
 and drills are original.
 """
 import os
+import random
 import re
 
 import mido
 
 from .song import STANDARD_TUNING
 
-GUITAR, BASS, PIANO = 25, 33, 1          # General MIDI programs
+# General MIDI programs (1-based, as in the GM tables)
+GUITAR, STEEL, DIST_GUITAR, BASS, PICK_BASS, PIANO, EPIANO, STRINGS = 25, 26, 31, 34, 35, 1, 5, 49
+KICK, SNARE, STICK, HAT, OPEN_HAT, RIDE, CRASH = 36, 38, 37, 42, 46, 51, 49
 NAMES = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
-CHORDS = {"C": (48, 52, 55), "D": (50, 54, 57), "E": (52, 56, 59), "F": (53, 57, 60), "G": (43, 47, 50),
-          "A": (45, 49, 52), "Am": (45, 48, 52), "Em": (52, 55, 59), "Dm": (50, 53, 57)}
+# open-position guitar voicings, low to high, for the strummed rhythm part
+SHAPES = {"C": (48, 52, 55, 60, 64), "D": (50, 57, 62, 66), "E": (40, 47, 52, 56, 59, 64), "F": (41, 48, 53, 57, 60, 65),
+          "G": (43, 47, 50, 55, 59, 67), "A": (45, 52, 57, 61, 64), "Am": (45, 52, 57, 60, 64),
+          "Em": (40, 47, 52, 55, 59, 64), "Dm": (50, 57, 62, 65)}
+CHORDS = {k: tuple(m for m in v if 48 <= m <= 67)[:3] for k, v in SHAPES.items()}   # compact triads for pads
 ROOTS = {"C": 36, "D": 38, "E": 40, "F": 41, "G": 31, "A": 33, "Am": 33, "Em": 40, "Dm": 38}
+TPB = 480
 
 
 def n(name):
@@ -81,37 +88,147 @@ def midi_file(bpm, tracks, beats_per_bar=4):
     return mid
 
 
-def accompaniment(chords, beats_per_bar=4, style="pop"):
-    """Bass + piano from one chord name per bar ('' = silence that bar)."""
-    bass, piano = [], []
-    for bar, ch in enumerate(chords):
-        if not ch:
-            continue
-        t = bar * beats_per_bar
-        root, triad = ROOTS[ch], CHORDS[ch]
-        if style == "waltz":
-            bass.append((t, 1.0, root, 90))
-            piano += [(t + 1, 1.0, m, 65) for m in triad] + [(t + 2, 1.0, m, 65) for m in triad]
-        elif style == "pad":
-            bass.append((t, float(beats_per_bar), root, 85))
-            piano += [(t, float(beats_per_bar), m, 60) for m in triad]
+class Arranger:
+    """Builds the band from one chord per bar: drums, bass and a strummed acoustic guitar,
+    with small random velocity and timing differences so it doesn't sound like a machine.
+    Styles: pop (4/4 tunes), waltz (3/4), pad (scales), rock (riffs), blues (shuffle feel)."""
+
+    def __init__(self, chords, beats_per_bar=4, style="pop", seed=1):
+        self.chords, self.bpb, self.style = chords, beats_per_bar, style
+        self.rng = random.Random(seed)
+        self.bass, self.strum, self.pad, self.drums = [], [], [], []
+
+    # -- helpers
+    def v(self, base, spread=8):
+        return max(1, min(127, base + self.rng.randint(-spread, spread)))
+
+    def t(self, beats, jitter=0.012):
+        """Beat position with a few milliseconds of human timing (never early on beat 1)."""
+        off = self.rng.uniform(-jitter, jitter) if beats % self.bpb else self.rng.uniform(0, jitter / 2)
+        return beats + off
+
+    def hit(self, beat, note, vel, length=0.25):
+        self.drums.append((self.t(beat, 0.006), length, note, self.v(vel, 6), 9))
+
+    def chord(self, beat, shape, vel, length, up=False):
+        """One strum: strings 12 ms apart, downstroke low to high, upstroke the other way."""
+        notes = list(shape) if not up else list(reversed(shape))
+        t0 = self.t(beat)
+        for k, m in enumerate(notes):
+            self.strum.append((t0 + k * 0.012 * self.bpb / 4, length - k * 0.012, m, self.v(vel - 4 * (k if not up else 0))))
+
+    # -- styles
+    def build(self):
+        for bar, ch in enumerate(self.chords):
+            t = bar * self.bpb
+            if ch:
+                getattr(self, "bar_" + self.style)(t, ch, bar, bar == len(self.chords) - 1)
+        if self.chords and self.chords[0] and self.style != "pad":
+            self.hit(0, CRASH, 90, 1.0)
+        return self
+
+    def bar_pop(self, t, ch, bar, last):
+        root, shape = ROOTS[ch], SHAPES[ch]
+        # drums: kick 1 and 3 (+ "and" of 3 every other bar), snare 2 and 4, hats in eighths
+        for b in (0, 2):
+            self.hit(t + b, KICK, 105)
+        if bar % 2:
+            self.hit(t + 2.5, KICK, 80)
+        for b in (1, 3):
+            self.hit(t + b, SNARE, 100)
+        for k in range(self.bpb * 2):
+            self.hit(t + k * 0.5, HAT, 78 if k % 2 == 0 else 58)
+        # bass: root on 1 and 3, fifth on 2 and 4, octave pickup into the next bar
+        for b in range(self.bpb):
+            self.bass.append((self.t(t + b), 0.9, root if b % 2 == 0 else root + 7, self.v(96 if b % 2 == 0 else 84)))
+        if not last:
+            self.bass.append((self.t(t + 3.5), 0.45, root + 12, self.v(72)))
+        # strum: D . D U . U D U
+        pattern = ((0, 1.0, False, 92), (1, 0.5, False, 84), (1.5, 0.5, True, 70), (2.5, 0.5, True, 72), (3, 0.5, False, 84), (3.5, 0.5, True, 70))
+        if last:
+            pattern = ((0, 3.5, False, 96),)
+        for beat, length, up, vel in pattern:
+            self.chord(t + beat, shape, vel, length, up)
+
+    def bar_waltz(self, t, ch, bar, last):
+        root, shape = ROOTS[ch], SHAPES[ch]
+        self.hit(t, KICK, 96)
+        self.hit(t + 1, STICK, 70)
+        self.hit(t + 2, STICK, 64)
+        for b in range(3):
+            self.hit(t + b, HAT, 60)
+        self.bass.append((self.t(t), 1.8, root, self.v(96)))
+        self.bass.append((self.t(t + 2), 0.9, root + 7 if bar % 2 == 0 else root + 12, self.v(78)))
+        if last:
+            self.chord(t, shape, 94, 2.8)
         else:
-            for beat in range(beats_per_bar):
-                bass.append((t + beat, 1.0, root if beat % 2 == 0 else root + 7, 88 if beat % 2 == 0 else 78))
-            for beat in range(0, beats_per_bar, 2):
-                piano += [(t + beat, 2.0, m, 65) for m in triad]
-    return [("Bass", BASS, 1, bass), ("Piano", PIANO, 2, piano)]
+            self.chord(t + 1, shape, 82, 0.9)
+            self.chord(t + 2, shape, 74, 0.9, up=True)
+
+    def bar_pad(self, t, ch, bar, last):
+        root, triad = ROOTS[ch], CHORDS[ch]
+        for m in triad:
+            self.pad.append((t, float(self.bpb), m, 64))
+        self.bass.append((self.t(t), self.bpb - 0.2, root, self.v(90)))
+        for b in range(self.bpb):
+            self.hit(t + b, HAT, 52 if b else 66)
+        self.hit(t, KICK, 70)
+
+    def bar_rock(self, t, ch, bar, last):
+        root = ROOTS[ch]
+        for b in (0, 2):
+            self.hit(t + b, KICK, 110)
+        self.hit(t + 1.5, KICK, 90)
+        for b in (1, 3):
+            self.hit(t + b, SNARE, 108)
+        for k in range(self.bpb * 2):
+            self.hit(t + k * 0.5, HAT if k % 2 == 0 else OPEN_HAT if k == 7 else HAT, 88 if k % 2 == 0 else 66)
+        for k in range(self.bpb * 2):
+            self.bass.append((self.t(t + k * 0.5), 0.45, root, self.v(104 if k % 2 == 0 else 92)))
+        if last:
+            self.strum.append((t, 3.5, root + 12, 100))
+            self.strum.append((t, 3.5, root + 19, 96))
+
+    def bar_blues(self, t, ch, bar, last):
+        root = ROOTS[ch]
+        swing = 0.67                                 # the "and" lands late: a shuffle
+        self.hit(t, KICK, 104)
+        self.hit(t + 2, KICK, 100)
+        for b in (1, 3):
+            self.hit(t + b, SNARE, 98)
+        for b in range(self.bpb):
+            self.hit(t + b, RIDE, 82)
+            self.hit(t + b + swing, RIDE, 60)
+        walk = (root, root + 4, root + 7, root + 9) if bar % 2 == 0 else (root + 10, root + 9, root + 7, root + 4)
+        for b, m in enumerate(walk):
+            self.bass.append((self.t(t + b), 0.9, m, self.v(98)))
+        if last:
+            self.strum.append((t, 3.5, root + 12, 96))
+            self.strum.append((t, 3.5, root + 16, 90))
+            self.strum.append((t, 3.5, root + 22, 90))
+
+    def tracks(self):
+        self.build()
+        out = []
+        if self.drums:
+            out.append(("Drums", 1, 9, self.drums))
+        if self.bass:
+            out.append(("Bass", PICK_BASS if self.style in ("rock", "blues") else BASS, 1, self.bass))
+        if self.strum:
+            out.append(("Rhythm", DIST_GUITAR if self.style == "rock" else STEEL, 2, self.strum))
+        if self.pad:
+            out.append(("Strings", STRINGS, 3, self.pad))
+        return out
 
 
-def drums(bars, beats_per_bar=4):
-    ev = []
-    for bar in range(bars):
-        t = bar * beats_per_bar
-        for beat in range(beats_per_bar):
-            ev.append((t + beat, 0.25, 36 if beat % 2 == 0 else 38, 100, 9))     # kick / snare
-            ev.append((t + beat, 0.25, 42, 60, 9))                               # closed hat
-            ev.append((t + beat + 0.5, 0.25, 42, 50, 9))
-    return [("Drums", 1, 9, ev)]
+def accompaniment(chords, beats_per_bar=4, style="pop", seed=1):
+    """Bass, drums and rhythm guitar from one chord name per bar ('' = silence that bar)."""
+    return Arranger(chords, beats_per_bar, style, seed).tracks()
+
+
+def drums(bars, beats_per_bar=4, roots=None, style="rock"):
+    """Drums and bass for a riff: ``roots`` is one chord name per bar (default E)."""
+    return Arranger(roots or ["E"] * bars, beats_per_bar, style).tracks()
 
 
 def melody(seq, vel=100, start=0.0):
@@ -196,13 +313,8 @@ def ode_to_joy():
     a = [("E4", 1), ("E4", 1), ("F4", 1), ("G4", 1), ("G4", 1), ("F4", 1), ("E4", 1), ("D4", 1),
          ("C4", 1), ("C4", 1), ("D4", 1), ("E4", 1)]
     m = a + [("E4", 1.5), ("D4", 0.5), ("D4", 2)] + a + [("D4", 1.5), ("C4", 0.5), ("C4", 2)]
-    chords = ["C", "G", "C", "G", "C", "G", "C", "G"]
-    tracks = accompaniment(chords[:-1]) 
-    # last bar: G for two beats, then C
-    t = 7 * 4
-    tracks[0][3].extend([(t, 2.0, ROOTS["G"], 90), (t + 2, 2.0, ROOTS["C"], 90)])
-    tracks[1][3].extend([(t, 2.0, x, 65) for x in CHORDS["G"]] + [(t + 2, 2.0, x, 65) for x in CHORDS["C"]])
-    return midi_file(100, [("Guitar", GUITAR, 0, melody(m))] + tracks)
+    chords = ["C", "G", "C", "G", "C", "G", "C", "C"]
+    return midi_file(100, [("Guitar", GUITAR, 0, melody(m))] + accompaniment(chords))
 
 
 def jingle_bells():
@@ -259,7 +371,7 @@ def power_riff():
     bar_a = [("E2", 1, 0), ("E2", 1, 0), ("G2", 1, 0), ("A2", 1, 0)]
     bar_b = [("E2", 1, 0), ("E2", 1, 0), ("Bb2", 0.5, 0), ("A2", 1.5, 0)]
     m = (bar_a + bar_b) * 4
-    return midi_file(100, [("Guitar", GUITAR, 0, melody(m))] + drums(8))
+    return midi_file(100, [("Guitar", GUITAR, 0, melody(m))] + drums(8, roots=["E"] * 8))
 
 
 def blues_shuffle():
@@ -270,14 +382,14 @@ def blues_shuffle():
     m = []
     for ch in form:
         m += [(name, 0.5, s) for name, s in pat[ch]]
-    return midi_file(96, [("Guitar", GUITAR, 0, melody(m))] + drums(12))
+    return midi_file(96, [("Guitar", GUITAR, 0, melody(m))] + drums(12, roots=form, style="blues"))
 
 
 def em_groove():
     bar1 = [("E2", 0.5, 0), (None, 0.5), ("E2", 0.5, 0), (None, 0.5), ("G2", 0.5, 0), ("G2", 0.5, 0), ("A2", 0.5, 1), (None, 0.5)]
     bar2 = [("E2", 0.5, 0), (None, 0.5), ("E2", 0.5, 0), (None, 0.5), ("B2", 0.5, 1), ("A2", 0.5, 1), ("G2", 0.5, 0), (None, 0.5)]
     m = (bar1 + bar2) * 4
-    return midi_file(110, [("Guitar", GUITAR, 0, melody(m))] + drums(8))
+    return midi_file(110, [("Guitar", GUITAR, 0, melody(m))] + drums(8, roots=["Em"] * 8))
 
 
 # ------------------------------------------------------------------ stage 6: classics

@@ -1,13 +1,20 @@
 """Backing tracks and the metronome.
 
-``render_backing`` writes a WAV of every MIDI track except the guitar's. It uses FluidSynth with a
-General MIDI soundfont when both are installed (``apt install fluidsynth fluid-soundfont-gm``),
-otherwise a small numpy synthesiser so the song still has bass and chords to play along to.
+``render_backing`` writes a stereo 44.1 kHz WAV of every MIDI track except the guitar's, using
+the first renderer that works:
+
+1. tinysoundfont (pip package, no system install) with a General MIDI soundfont,
+2. the FluidSynth command (``apt install fluidsynth``) with the same soundfont,
+3. a small numpy synthesiser, so the song still has bass and chords to play along to.
+
+The soundfont is GeneralUser GS (free, ~32 MB). ``ensure_soundfont`` downloads it into
+``soundfonts/`` on first use; a system soundfont is used if one is already installed.
 """
 import os
 import shutil
 import subprocess
 import tempfile
+import urllib.request
 import wave
 
 import mido
@@ -15,21 +22,47 @@ import numpy as np
 
 from .song import _tempo_map, _tick_to_seconds, track_notes
 
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+SOUNDFONT_DIR = os.path.join(ROOT, "soundfonts")
+GENERALUSER_URL = "https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/main/GeneralUser-GS.sf2"
+GENERALUSER_MIN_BYTES = 30_000_000
+RATE = 44100
 SOUNDFONTS = [
+    os.path.join(SOUNDFONT_DIR, "GeneralUser-GS.sf2"),
     "/usr/share/sounds/sf2/FluidR3_GM.sf2",
-    "/usr/share/sounds/sf2/TimGM6mb.sf2",
     "/usr/share/soundfonts/FluidR3_GM.sf2",
     "/usr/share/soundfonts/default.sf2",
-    "/opt/homebrew/share/soundfonts/default.sf2",
-    "/usr/local/share/soundfonts/default.sf2",
+    "/usr/share/sounds/sf2/TimGM6mb.sf2",
 ]
 
 
 def find_soundfont():
-    for p in SOUNDFONTS + [os.environ.get("SOUNDFONT", "")]:
+    for p in [os.environ.get("SOUNDFONT", "")] + SOUNDFONTS:
         if p and os.path.exists(p):
             return p
     return None
+
+
+def ensure_soundfont(log=print):
+    """The best soundfont available, downloading GeneralUser GS if there is none."""
+    sf = find_soundfont()
+    if sf:
+        return sf
+    target = SOUNDFONTS[0]
+    os.makedirs(SOUNDFONT_DIR, exist_ok=True)
+    tmp = target + ".part"
+    try:
+        log("Downloading GeneralUser GS soundfont (32 MB)...")
+        urllib.request.urlretrieve(GENERALUSER_URL, tmp)
+        if os.path.getsize(tmp) < GENERALUSER_MIN_BYTES:
+            raise OSError("download too small")
+        os.replace(tmp, target)
+        return target
+    except Exception as e:
+        log("Soundfont download failed (%s); using the built-in synth" % e)
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        return None
 
 
 def backing_path(song, speed=1.0):
@@ -45,7 +78,7 @@ def has_accompaniment(song):
     return any(i != song.guitar_track and track_notes(mid, i) for i in range(len(mid.tracks)))
 
 
-def ensure_backing(song, rate=22050, force=False, speed=1.0):
+def ensure_backing(song, rate=RATE, force=False, speed=1.0):
     """Render the backing track if it is missing. Returns the WAV path, or None if the song has
     no accompaniment tracks (metronome only). ``speed`` < 1 renders a slowed-down practice copy."""
     out = backing_path(song, speed)
@@ -59,7 +92,7 @@ def ensure_backing(song, rate=22050, force=False, speed=1.0):
     return out
 
 
-def render_backing(midi_path, out_wav, mute_track, rate=22050, speed=1.0):
+def render_backing(midi_path, out_wav, mute_track, rate=RATE, speed=1.0):
     mid = mido.MidiFile(midi_path)
     stripped = mido.MidiFile(ticks_per_beat=mid.ticks_per_beat, type=1)
     for i, tr in enumerate(mid.tracks):
@@ -70,19 +103,18 @@ def render_backing(midi_path, out_wav, mute_track, rate=22050, speed=1.0):
         stripped.tracks.append(tr)
     if speed < 0.999 and not any(m.type == "set_tempo" for t in stripped.tracks for m in t):
         stripped.tracks[0].insert(0, mido.MetaMessage("set_tempo", tempo=int(500000 / speed), time=0))
-    sf = find_soundfont()
-    exe = shutil.which("fluidsynth")
-    if exe and sf:
+    sf = ensure_soundfont()
+    if sf:
         fd, tmp = tempfile.mkstemp(suffix=".mid")
         os.close(fd)
         try:
             stripped.save(tmp)
-            cmd = [exe, "-ni", "-q", "-g", "0.8", "-r", str(rate), "-O", "s16", "-F", out_wav, sf, tmp]
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            _to_mono(out_wav)
-            return "fluidsynth"
-        except (subprocess.CalledProcessError, OSError):
-            pass
+            audio = render_tinysoundfont(tmp, sf, rate)
+            if audio is not None:
+                write_wav(out_wav, audio, rate)
+                return "tinysoundfont"
+            if render_fluidsynth(tmp, sf, out_wav, rate):
+                return "fluidsynth"
         finally:
             os.unlink(tmp)
     audio = synth_midi(stripped, rate)
@@ -90,27 +122,69 @@ def render_backing(midi_path, out_wav, mute_track, rate=22050, speed=1.0):
     return "numpy"
 
 
-def _to_mono(path):
-    with wave.open(path, "rb") as w:
-        ch, width, rate, n = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
-        data = w.readframes(n)
-    if ch == 1 and width == 2:
-        return
-    a = np.frombuffer(data, dtype=np.int16).reshape(-1, ch).astype(np.float32).mean(axis=1)
-    write_wav(path, a / 32767.0, rate)
+def render_tinysoundfont(midi_path, soundfont, rate):
+    """Offline render with the tinysoundfont package. Returns float32 (n, 2) or None."""
+    try:
+        import tinysoundfont
+    except ImportError:
+        return None
+    try:
+        synth = tinysoundfont.Synth(gain=-6.0, samplerate=rate)
+        synth.sfload(soundfont)
+        seq = tinysoundfont.Sequencer(synth)
+        seq.midi_load(midi_path)
+        chunks, block, tail = [], 2048, 0
+        while True:
+            buf = synth.generate(block)
+            a = np.frombuffer(buf, dtype=np.float32).reshape(-1, 2).copy()
+            chunks.append(a)
+            if seq.is_empty():
+                tail += 1
+                if tail * block > rate * 2.0 or np.max(np.abs(a)) < 1e-4 and tail * block > rate * 0.5:
+                    break
+            if len(chunks) * block > rate * 1800:          # 30 minutes: something is wrong
+                break
+        return _normalise(np.concatenate(chunks))
+    except Exception as e:  # a broken soundfont, an API change...
+        print("tinysoundfont failed: %s" % e)
+        return None
+
+
+def render_fluidsynth(midi_path, soundfont, out_wav, rate):
+    exe = shutil.which("fluidsynth")
+    if not exe:
+        return False
+    cmd = [exe, "-ni", "-q", "-g", "0.7", "-r", str(rate), "-O", "s16", "-R", "1", "-C", "1", "-F", out_wav, soundfont, midi_path]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, OSError):
+        return False
+    with wave.open(out_wav, "rb") as w:
+        ch, n = w.getnchannels(), w.getnframes()
+        a = np.frombuffer(w.readframes(n), dtype="<i2").astype(np.float32) / 32767.0
+    write_wav(out_wav, _normalise(a.reshape(-1, ch)), rate)
+    return True
+
+
+def _normalise(audio, peak_db=-1.0):
+    peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+    if peak > 1e-6:
+        audio = audio * (10 ** (peak_db / 20.0) / peak)
+    return audio
 
 
 def write_wav(path, audio, rate):
-    pcm = np.clip(audio, -1.0, 1.0)
-    pcm = (pcm * 32767).astype("<i2")
+    audio = np.asarray(audio, dtype=np.float32)
+    channels = 1 if audio.ndim == 1 else audio.shape[1]
+    pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2")
     with wave.open(path, "wb") as w:
-        w.setnchannels(1)
+        w.setnchannels(channels)
         w.setsampwidth(2)
         w.setframerate(rate)
         w.writeframes(pcm.tobytes())
 
 
-def synth_midi(mid, rate=22050):
+def synth_midi(mid, rate=RATE):
     """A plain additive synth: enough to hear the chords and the groove."""
     tempos = _tempo_map(mid)
     secs = _tick_to_seconds(tempos, mid.ticks_per_beat)
@@ -142,10 +216,11 @@ def synth_midi(mid, rate=22050):
     return out
 
 
-def click(rate=22050, accent=False):
+def click(rate=RATE, accent=False, channels=1):
     """One metronome tick as a mono int16 buffer."""
     n = int(rate * 0.03)
     t = np.arange(n) / rate
     f = 1800.0 if accent else 1200.0
     tone = np.sin(2 * np.pi * f * t) * np.exp(-t * 120.0) * 0.6
-    return (tone * 32767).astype("<i2").tobytes()
+    pcm = (tone * 32767).astype("<i2")
+    return np.repeat(pcm, channels).tobytes()

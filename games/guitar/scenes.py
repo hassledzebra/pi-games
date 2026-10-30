@@ -270,9 +270,9 @@ class PlayScene(Scene):
                     self.backing = pygame.mixer.Sound(file=wav)
             except Exception as e:
                 print("backing track failed: %s" % e)
-            rate = pygame.mixer.get_init()[0]
-            self.click = pygame.mixer.Sound(buffer=backing.click(rate))
-            self.click_accent = pygame.mixer.Sound(buffer=backing.click(rate, accent=True))
+            rate, _, channels = pygame.mixer.get_init()
+            self.click = pygame.mixer.Sound(buffer=backing.click(rate, channels=channels))
+            self.click_accent = pygame.mixer.Sound(buffer=backing.click(rate, accent=True, channels=channels))
         self.t0 = time.monotonic()
         self.song_time = -self.count_in
         self.paused = False

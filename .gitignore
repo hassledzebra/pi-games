@@ -23,3 +23,6 @@ Thumbs.db
 desktop.ini
 .idea/
 .vscode/
+
+# downloaded soundfont (32 MB, fetched on first run)
+soundfonts/
