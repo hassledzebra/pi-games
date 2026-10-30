@@ -47,6 +47,7 @@ def main(argv=None):
     ap.add_argument("--latency", type=float, default=40.0, help="input latency compensation in ms")
     ap.add_argument("--render", action="store_true", help="(re)render backing tracks for all songs and exit")
     ap.add_argument("--unlock-all", action="store_true", help="open every stage of the learning path (remembered)")
+    ap.add_argument("--start", metavar="ID", help="open the path on this exercise, e.g. 4-3")
     ap.add_argument("--lock", action="store_true", help="stages unlock by earning stars again (remembered)")
     ap.add_argument("--speed", type=int, default=100, choices=(50, 60, 70, 80, 90, 100), help="start at this practice speed (%%)")
     ap.add_argument("--fullscreen", dest="fullscreen", action="store_true", help="default on a Raspberry Pi")
@@ -91,6 +92,7 @@ def main(argv=None):
     app.settings["latency"] = args.latency / 1000.0
     app.settings["metronome"] = True
     app.settings["speed"] = args.speed / 100.0
+    app.settings["start"] = args.start
     from . import curriculum
     from .progress import Progress
     app.settings["paths"] = curriculum.write_all(args.songs)

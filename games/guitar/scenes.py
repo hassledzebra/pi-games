@@ -146,6 +146,11 @@ class TitleScene(Scene):
             stage, index = self.progress.first_open()
             if extra:
                 stage, index = len(STAGES), 0
+            start = app.settings.pop("start", None)
+            for k, st in enumerate(STAGES):
+                for i, ex in enumerate(st.exercises):
+                    if start and ex.id == start:
+                        stage, index = k, i
         self.stage, self.index = stage, index
         self.speed_i = SPEEDS.index(app.settings.get("speed", 1.0))
 
