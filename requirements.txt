@@ -1,0 +1,4 @@
+pygame-ce>=2.4
+numpy
+mido
+sounddevice

@@ -1,0 +1,25 @@
+# virtual environments and Python caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# generated: test screenshots, rendered backing tracks (WAV), generated exercise MIDIs, per-user progress, logs
+tests/out/
+*.wav
+songs/path/
+songs/progress.json
+*.log
+nohup.out
+
+# OS and editor junk
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
