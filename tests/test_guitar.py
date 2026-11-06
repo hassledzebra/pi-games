@@ -21,7 +21,7 @@ from engine.app import App  # noqa: E402
 from engine.sfx import Sfx  # noqa: E402
 from games.guitar import backing, curriculum, scenes  # noqa: E402
 from games.guitar.progress import Progress  # noqa: E402
-from games.guitar.pitch import FRAME, HOP, RATE, PitchFrame, PitchTracker, freq_to_midi, midi_to_freq, yin  # noqa: E402
+from games.guitar.pitch import FRAME, HOP, RATE, PitchFrame, PitchTracker, freq_to_midi, midi_to_freq, note_name, yin  # noqa: E402
 from games.guitar.chords import ChromaAnalyser, template  # noqa: E402
 from games.guitar.scoring import HIT, MISS, ChordJudge, Judge  # noqa: E402
 from games.guitar.song import STANDARD_TUNING, assign_fingering, load_song  # noqa: E402
@@ -405,11 +405,28 @@ def test_audio_devices():
     print("audio devices ok: names, config file, environment and command line order")
 
 
+def test_display_steady():
+    """A held E2 with a few wrong frames in it (another string ringing) must not make the readout jump."""
+    t = np.arange(int(1.5 * 44100)) / 44100.0
+    sig = 0.3 * np.sin(2 * np.pi * 82.41 * t) + 0.2 * np.sin(2 * np.pi * 164.8 * t)
+    blip = slice(int(0.6 * 44100), int(0.64 * 44100))            # 40 ms of G#2 (103.8 Hz)
+    sig[blip] = 0.3 * np.sin(2 * np.pi * 103.83 * t[blip])
+    tr = PitchTracker()
+    names = []
+    for i in range(0, len(sig) - 512, 512):
+        tr.feed(sig[i:i + 512], i / 44100.0)
+        if i / 44100.0 > 0.3 and tr.current is not None:
+            names.append(note_name(tr.current))
+    assert names and set(names) == {"E2"}, set(names)
+    print("display steady ok: %d readings, all E2 through a 40 ms wrong-note burst" % len(names))
+
+
 if __name__ == "__main__":
     test_yin()
     test_tracker()
     test_fingering()
     test_audio_devices()
+    test_display_steady()
     with tempfile.TemporaryDirectory() as tmp:
         songs = test_songs(tmp)
         test_progress(tmp)

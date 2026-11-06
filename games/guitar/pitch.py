@@ -106,10 +106,11 @@ class PitchTracker:
         self.pending = np.zeros(0, dtype=np.float64)
         self.levels = []            # recent dB levels (one per hop) for onset detection
         self.last_onset = -1.0
-        self.history = []           # last few midi values, for the smoothed display value
+        self.history = []           # recent midi values (None = unsure), for the smoothed display value
         self.current = None         # smoothed midi of the note being held, or None
         self.current_freq = 0.0
         self.frames_done = 0
+        self.display_hops, self.display_min, self.display_conf, self.display_glide = 9, 5, 0.85, 0.25
 
     def feed(self, samples, t_end):
         """samples: float array ending at wall-clock time t_end. Returns new PitchFrames."""
@@ -153,12 +154,18 @@ class PitchTracker:
                 self.analyser = ChromaAnalyser(self.rate, len(self.long))
             chroma = self.analyser.chroma(self.long)
         fr = PitchFrame(t, freq, conf, db, onset, chroma)
-        self.history.append(fr.midi)
-        if len(self.history) > 3:
+        # The on-screen note is a median over ~100 ms of confident frames, so the brief wrong readings
+        # while another string rings or a note decays do not make it jump. Scoring uses the raw frames.
+        self.history.append(fr.midi if fr.conf >= self.display_conf else None)
+        if len(self.history) > self.display_hops:
             self.history.pop(0)
         valid = [m for m in self.history if m is not None]
-        if len(valid) >= 2:
-            self.current = float(np.median(valid))
+        if len(valid) >= self.display_min:
+            target = float(np.median(valid))
+            # inside the same note the readout glides (no flicker in the Hz digits); a new note jumps
+            if self.current is not None and abs(target - self.current) < 0.5:
+                target = self.current + self.display_glide * (target - self.current)
+            self.current = target
             self.current_freq = midi_to_freq(self.current)
         else:
             self.current, self.current_freq = None, 0.0
