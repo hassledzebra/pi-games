@@ -90,27 +90,62 @@ class Ear:
         self.frames = queue.Queue()
         self.thread = None
         self._stop = False
+        self.want, self.log, self.fx = device, log, fx
         if not enabled:
             return
+        self._connect()
+        self.thread = threading.Thread(target=self._work, name="pitch", daemon=True)
+        self.thread.start()
+
+    def _connect(self):
+        """Open the interface (and its monitor). False, with ``error`` set, when it is not there."""
         try:
             from .pitch import AudioInput
             from engine.audio import wanted_input
-            device = AudioInput.resolve(device if device is not None else wanted_input())
+            device = AudioInput.resolve(self.want if self.want is not None else wanted_input())
             if device is None:
                 device = AudioInput.pick_device()
             self.input = AudioInput(device)
-            log("Listening on: %s" % self.input.name)
+            self.log("Listening on: %s" % self.input.name)
             from .fx import Monitor
-            self.monitor = Monitor(self._output_device(), log=log)
+            if self.monitor is None:
+                self.monitor = Monitor(self._output_device(), log=self.log)
+                name = self.monitor.set(self.fx) if self.fx and self.fx != "off" else "off"
+                if name != "off":
+                    self.log("Effect: %s" % name)
+            elif self.monitor.name != "off":
+                self.monitor.set(self.monitor.name)
             self.input.monitor = self.monitor
-            if fx and fx != "off":
-                log("Effect: %s" % self.monitor.set(fx))
+            self.error = None
+            return True
         except Exception as e:  # no PortAudio, no device, device busy...
-            self.error = str(e).strip().splitlines()[-1] if str(e).strip() else type(e).__name__
-            log("No audio input (%s) - demo mode" % self.error)
-            return
-        self.thread = threading.Thread(target=self._work, name="pitch", daemon=True)
-        self.thread.start()
+            self.input = None
+            msg = str(e).strip().splitlines()[-1] if str(e).strip() else type(e).__name__
+            if msg != self.error:
+                self.log("No audio input (%s) - demo mode; plug the interface in and it is picked up" % msg)
+            self.error = msg
+            return False
+
+    def _lost(self):
+        """The interface went away (stream stopped): drop it so the worker keeps looking for it."""
+        inp, self.input = self.input, None
+        self.log("Audio input lost - waiting for the interface")
+        if self.monitor is not None:
+            self.monitor._close()
+        try:
+            inp.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _rescan():
+        """PortAudio only sees devices that existed when it started; restart it to notice a new one."""
+        try:
+            import sounddevice as sd
+            sd._terminate()
+            sd._initialize()
+        except Exception:
+            pass
 
     @property
     def live(self):
@@ -145,11 +180,24 @@ class Ear:
         return (h[0], h[1]) if h and time.monotonic() - h[2] < seconds else None
 
     def _work(self):
-        q = self.input.q
+        last_try = 0.0
         while not self._stop:
+            inp = self.input
+            if inp is None:                            # not plugged in: look again every couple of seconds
+                time.sleep(0.2)
+                if time.monotonic() - last_try >= 2.0:
+                    if self.monitor is not None:
+                        self.monitor._close()
+                    self._rescan()
+                    self._connect()
+                    last_try = time.monotonic()
+                continue
             try:
-                samples, t_end = q.get(timeout=0.2)
+                samples, t_end = inp.q.get(timeout=0.2)
             except queue.Empty:
+                if not inp.stream.active:
+                    self._lost()
+                    last_try = time.monotonic()
                 continue
             for fr in self.tracker.feed(samples, t_end):
                 self.frames.put(fr)
@@ -176,16 +224,16 @@ class Ear:
             self.thread.join(timeout=1.0)
         if self.monitor is not None:
             self.monitor.close()
-        if self.input is not None:
-            self.input.close()
-            self.input = None
+        inp, self.input = self.input, None
+        if inp is not None:
+            inp.close()
 
 
 def draw_tuner(surface, tracker, y, live, chord=None, fx="off"):
     """Detected note, cents bar and input level."""
     pygame.draw.rect(surface, PANEL, (0, y, WIDTH, HEIGHT - y))
     if not live:
-        text.draw(surface, "NO AUDIO INPUT - plug in the USB interface, or watch the demo", 16, GREY, (WIDTH // 2, y + 22))
+        text.draw(surface, "NO AUDIO INPUT - plug in the USB interface (found automatically), or watch the demo", 16, GREY, (WIDTH // 2, y + 22))
         return
     midi = tracker.current
     cx = WIDTH // 2
@@ -332,8 +380,9 @@ class TitleScene(Scene):
         # bottom controls
         text.draw(surface, "Left/Right stage   Up/Down exercise   Enter play   -/+ speed %d%%   M metronome %s   Esc quit" %
                   (round(SPEEDS[self.speed_i] * 100), "on" if self.app.settings.get("metronome", True) else "off"), 14, GREY, (WIDTH // 2 + 90, 285))
-        if self.ear.live:
-            text.draw(surface, "input: " + self.ear.input.name[:24], 14, GREEN, (16, 285), align="left")
+        inp = self.ear.input
+        if inp is not None:
+            text.draw(surface, "input: " + inp.name[:24], 14, GREEN, (16, 285), align="left")
         draw_tuner(surface, self.ear.tracker, 300, self.ear.live, self.ear.recent_chord(), self.ear.fx_name)
 
 
@@ -619,7 +668,7 @@ class PlayScene(Scene):
         y = 300
         pygame.draw.rect(surface, PANEL, (0, y, WIDTH, HEIGHT - y))
         if not (self.ear.live or self.demo):
-            text.draw(surface, "NO AUDIO INPUT - plug in the USB interface, or watch the demo", 16, GREY, (WIDTH // 2, y + 22))
+            text.draw(surface, "NO AUDIO INPUT - plug in the USB interface (found automatically), or watch the demo", 16, GREY, (WIDTH // 2, y + 22))
             return
         name, score = self.judge.heard
         if name:
