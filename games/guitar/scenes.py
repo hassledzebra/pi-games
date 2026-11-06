@@ -14,7 +14,7 @@ from . import backing
 from .curriculum import EXERCISES, STAGES, PATH_DIR
 from .progress import STARS_TO_UNLOCK, Progress
 from .pitch import PitchFrame, PitchTracker, midi_to_freq, note_name
-from .chords import template
+from .chords import best_chord, template
 from .curriculum import voicing
 from .scoring import HIT, MISS, PENDING, ChordJudge, Judge
 from .song import find_songs, load_song
@@ -80,8 +80,11 @@ class Ear:
     for a pitch estimate and a slow frame never delays the audio queue.
     """
 
-    def __init__(self, device=None, enabled=True, log=print):
+    def __init__(self, device=None, enabled=True, log=print, fx="off"):
         self.tracker = PitchTracker()
+        self.tracker.chords = True                  # always listen for strums: the tuner strip names them
+        self.heard_chord = None                     # (name, score, monotonic time) of the latest strum
+        self.monitor = None
         self.input = None
         self.error = None
         self.frames = queue.Queue()
@@ -97,6 +100,11 @@ class Ear:
                 device = AudioInput.pick_device()
             self.input = AudioInput(device)
             log("Listening on: %s" % self.input.name)
+            from .fx import Monitor
+            self.monitor = Monitor(self._output_device(), log=log)
+            self.input.monitor = self.monitor
+            if fx and fx != "off":
+                log("Effect: %s" % self.monitor.set(fx))
         except Exception as e:  # no PortAudio, no device, device busy...
             self.error = str(e).strip().splitlines()[-1] if str(e).strip() else type(e).__name__
             log("No audio input (%s) - demo mode" % self.error)
@@ -108,6 +116,34 @@ class Ear:
     def live(self):
         return self.input is not None
 
+    @staticmethod
+    def _output_device():
+        """The speaker for the effects: the chosen --output (part of a name), else the system default."""
+        from engine.audio import match, wanted_output
+        want = wanted_output()
+        if not want:
+            return None
+        try:
+            import sounddevice as sd
+            names = {i: d["name"] for i, d in enumerate(sd.query_devices()) if d["max_output_channels"] > 0}
+            name = match(want, list(names.values()))
+            return next((i for i, n in names.items() if n == name), None)
+        except Exception:
+            return None
+
+    @property
+    def fx_name(self):
+        return self.monitor.name if self.monitor is not None else "off"
+
+    def cycle_fx(self):
+        """Next guitar effect (off, clean, crunch ...). Returns its name."""
+        return self.monitor.next() if self.monitor is not None else "off"
+
+    def recent_chord(self, seconds=2.5):
+        """(name, score) of a strum heard in the last few seconds, else None."""
+        h = self.heard_chord
+        return (h[0], h[1]) if h and time.monotonic() - h[2] < seconds else None
+
     def _work(self):
         q = self.input.q
         while not self._stop:
@@ -117,6 +153,10 @@ class Ear:
                 continue
             for fr in self.tracker.feed(samples, t_end):
                 self.frames.put(fr)
+                if fr.chroma is not None:
+                    name, score = best_chord(fr.chroma)
+                    if score >= 0.72:
+                        self.heard_chord = (name, score, time.monotonic())
 
     def listen_for_chords(self, on):
         self.tracker.chords = bool(on)
@@ -134,12 +174,14 @@ class Ear:
         self._stop = True
         if self.thread is not None:
             self.thread.join(timeout=1.0)
+        if self.monitor is not None:
+            self.monitor.close()
         if self.input is not None:
             self.input.close()
             self.input = None
 
 
-def draw_tuner(surface, tracker, y, live):
+def draw_tuner(surface, tracker, y, live, chord=None, fx="off"):
     """Detected note, cents bar and input level."""
     pygame.draw.rect(surface, PANEL, (0, y, WIDTH, HEIGHT - y))
     if not live:
@@ -149,7 +191,10 @@ def draw_tuner(surface, tracker, y, live):
     cx = WIDTH // 2
     pygame.draw.rect(surface, DIM, (cx - 150, y + 30, 300, 6))
     pygame.draw.rect(surface, GREY, (cx - 1, y + 26, 2, 14))
-    if midi is None:
+    if midi is None and chord:
+        text.draw(surface, "chord  %s" % chord[0], 28, GOLD, (cx, y + 12))
+        text.draw(surface, "%d%% match" % round(chord[1] * 100), 14, GREY, (cx + 220, y + 30))
+    elif midi is None:
         text.draw(surface, "--", 28, GREY, (cx, y + 12))
     else:
         cents = (midi - round(midi)) * 100.0
@@ -163,6 +208,7 @@ def draw_tuner(surface, tracker, y, live):
     pygame.draw.rect(surface, DIM, (20, y + 30, 100, 6))
     pygame.draw.rect(surface, GREEN if db < -6 else RED, (20, y + 30, int(100 * lvl), 6))
     text.draw(surface, "input", 14, GREY, (20, y + 12), align="left")
+    text.draw(surface, "fx: %s  (E)" % fx, 14, GOLD if fx != "off" else GREY, (WIDTH - 20, y + 12), align="right")
 
 
 SPEEDS = [0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
@@ -234,6 +280,8 @@ class TitleScene(Scene):
             self.app.switch(PlayScene(self.app, path, ex, (self.stage, self.index)))
         elif event.key == pygame.K_m:
             self.app.settings["metronome"] = not self.app.settings.get("metronome", True)
+        elif event.key == pygame.K_e:
+            self.ear.cycle_fx()
 
     def update(self):
         self.ear.poll()
@@ -286,7 +334,7 @@ class TitleScene(Scene):
                   (round(SPEEDS[self.speed_i] * 100), "on" if self.app.settings.get("metronome", True) else "off"), 14, GREY, (WIDTH // 2 + 90, 285))
         if self.ear.live:
             text.draw(surface, "input: " + self.ear.input.name[:24], 14, GREEN, (16, 285), align="left")
-        draw_tuner(surface, self.ear.tracker, 300, self.ear.live)
+        draw_tuner(surface, self.ear.tracker, 300, self.ear.live, self.ear.recent_chord(), self.ear.fx_name)
 
 
 class PlayScene(Scene):
@@ -318,7 +366,7 @@ class PlayScene(Scene):
             self.judge = ChordJudge(self.song)
         else:
             self.judge = Judge(self.notes)
-        self.ear.listen_for_chords(self.chords)
+        self.ear.listen_for_chords(True)
         self.count_in = self.song.beat * self.song.beats_per_bar * self.COUNT_IN_BARS
         self.metronome = app.settings.get("metronome", True)
         self.backing = None
@@ -362,6 +410,8 @@ class PlayScene(Scene):
         elif event.key == pygame.K_m:
             self.metronome = not self.metronome
             self.app.settings["metronome"] = self.metronome
+        elif event.key == pygame.K_e:
+            self.ear.cycle_fx()
 
     def _toggle_pause(self):
         if self.paused:
@@ -503,7 +553,7 @@ class PlayScene(Scene):
             text.draw(surface, str(int(-t / beat) + 1), 64, GOLD, (WIDTH // 2, HEIGHT // 2 - 40))
         if self.paused:
             text.draw(surface, "PAUSED - Space to resume", 28, GOLD, (WIDTH // 2, HEIGHT // 2 - 20))
-        draw_tuner(surface, self.ear.tracker, 300, self.ear.live or self.demo)
+        draw_tuner(surface, self.ear.tracker, 300, self.ear.live or self.demo, self.ear.recent_chord(), self.ear.fx_name)
         if self.demo:
             text.draw(surface, "DEMO", 16, GOLD, (WIDTH - 10, 306), align="right")
 

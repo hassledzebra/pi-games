@@ -42,6 +42,8 @@ def main(argv=None):
     ap.add_argument("--input", "--device", dest="device", metavar="NAME|INDEX",
                     help="audio input: part of its name or its index (see --list-devices); default: auto")
     ap.add_argument("--output", metavar="NAME", help="speaker to play on: part of its name (default: system default)")
+    ap.add_argument("--fx", default=os.environ.get("PI_FX", "off"), metavar="NAME",
+                    help="guitar effect heard through the speakers: off clean crunch lead chorus space (E cycles it)")
     ap.add_argument("--list-devices", action="store_true", help="print the audio outputs and inputs and exit")
     ap.add_argument("--tuner", action="store_true", help="console pitch test, no window")
     ap.add_argument("--no-input", action="store_true", help="don't open an audio input")
@@ -117,7 +119,7 @@ def main(argv=None):
     app.sfx = Sfx(enabled=not args.mute)
     app.sfx.synth("hit", 0.06, lambda t, k: __import__("math").sin(t * 2 * 3.14159 * 880) * (1 - k), 0.25)
     app.sfx.synth("miss", 0.08, lambda t, k: __import__("math").sin(t * 2 * 3.14159 * 160) * (1 - k), 0.25)
-    ear = Ear(device=args.device, enabled=not args.no_input)   # a name or index; Ear falls back to its own guess
+    ear = Ear(device=args.device, enabled=not args.no_input, fx=args.fx)   # a name or index; Ear falls back to its own guess
     app.settings["ear"] = ear
     try:
         app.run(TitleScene(app))

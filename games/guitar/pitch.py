@@ -182,6 +182,7 @@ class AudioInput:
         self.q = queue.Queue()
         self.channel = channel
         self.overflows = 0
+        self.monitor = None         # optional fx.Monitor: hear the playing through the speakers
         self.lock = threading.Lock()
         info = sd.query_devices(device, "input")
         channels = max(1, min(2, int(info["max_input_channels"])))
@@ -193,7 +194,10 @@ class AudioInput:
     def _cb(self, indata, frames, time_info, status):
         if status and status.input_overflow:
             self.overflows += 1
-        self.q.put((indata[:, min(self.channel, indata.shape[1] - 1)].copy(), time.monotonic()))
+        block = indata[:, min(self.channel, indata.shape[1] - 1)].copy()
+        self.q.put((block, time.monotonic()))
+        if self.monitor is not None:
+            self.monitor.push(block)
 
     def poll(self):
         """All blocks captured since the last call, as (samples, t_end) pairs."""

@@ -92,6 +92,20 @@ class ChromaAnalyser:
         return max(scored) if scored else (0.0, None)
 
 
+COMMON = [PITCH_CLASSES[pc] + q for pc in range(12) for q in ("", "m", "7")]
+
+
+def best_chord(chroma, names=None):
+    """The best-matching chord among the common major, minor and seventh chords: (name, 0..1 score)."""
+    best = (None, 0.0)
+    for n in names or COMMON:
+        t = template(n)
+        score = float(np.dot(chroma, t)) if t is not None else 0.0
+        if score > best[1]:
+            best = (n, score)
+    return best
+
+
 def chord_name(pc, quality):
     return PITCH_CLASSES[pc] + quality
 

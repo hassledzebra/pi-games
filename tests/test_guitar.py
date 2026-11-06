@@ -421,12 +421,57 @@ def test_display_steady():
     print("display steady ok: %d readings, all E2 through a 40 ms wrong-note burst" % len(names))
 
 
+def test_effects_and_live_chord():
+    """Effect chains stay finite and loud enough, and a strum is named in the tuner strip."""
+    from games.guitar import fx
+    from games.guitar.chords import best_chord
+    r, n = 44100, 512
+    t = np.arange(r) / r
+    e2 = 0.3 * np.sin(2 * np.pi * 82.41 * t) + 0.15 * np.sin(2 * np.pi * 164.8 * t)
+    for name in fx.PRESETS:
+        chain = fx.Chain(name)
+        out = np.concatenate([chain.process(e2[i:i + n]) for i in range(0, len(e2) - n, n)])
+        assert out.shape[1] == 2 and np.isfinite(out).all() and abs(out).max() <= 0.98, name
+        assert 0.02 < np.sqrt((out ** 2).mean()) < 0.9, (name, np.sqrt((out ** 2).mean()))
+    # drive adds harmonics: more energy above the second harmonic than the clean preset
+    def highs(name):
+        chain = fx.Chain(name)
+        o = np.concatenate([chain.process(e2[i:i + n]) for i in range(0, len(e2) - n, n)])[:, 0]
+        sp = np.abs(np.fft.rfft(o))
+        f = np.fft.rfftfreq(len(o), 1 / r)
+        return sp[(f > 400) & (f < 3000)].sum() / sp.sum()
+    assert highs("lead") > 2 * highs("clean")
+    # reverb leaves a tail after the note stops
+    chain = fx.Chain("space")
+    chain.process(e2[:n])
+    tail = np.concatenate([chain.process(np.zeros(n)) for _ in range(8)])
+    assert np.abs(tail).max() > 0.01
+    mon = fx.Monitor(log=lambda *a: None)
+    mon.chain, mon.name = fx.Chain("crunch"), "crunch"
+    mon.push(e2[:n])
+    buf = np.zeros((n, 2), dtype=np.float32)
+    mon._pull(buf, n, None, None)
+    assert np.abs(buf).max() > 0.01
+    mon._pull(buf, n, None, None)                      # nothing queued: silence, counted as an underrun
+    assert np.abs(buf).max() == 0 and mon.underruns == 1
+    assert [fx.NAMES[0], fx.NAMES[1]] == ["off", "clean"]
+    # a G strum (G2 B2 D3 G3 B3 G4 with harmonics) is named G
+    from games.guitar.chords import ChromaAnalyser
+    tt = np.arange(8192) / r
+    strum = sum(sum(a / k * np.sin(2 * np.pi * f * k * tt) for k, a in enumerate((1.0, 0.7, 0.5, 0.3), 1))
+                for f in (98.0, 123.5, 146.8, 196.0, 246.9, 392.0))
+    name, score = best_chord(ChromaAnalyser(r, 8192).chroma(strum))
+    assert name == "G" and score > 0.8, (name, score)
+    print("effects ok: %d presets finite, drive adds harmonics, reverb tails, strum named %s (%.2f)" % (len(fx.PRESETS), name, score))
+
+
 if __name__ == "__main__":
     test_yin()
     test_tracker()
     test_fingering()
     test_audio_devices()
     test_display_steady()
+    test_effects_and_live_chord()
     with tempfile.TemporaryDirectory() as tmp:
         songs = test_songs(tmp)
         test_progress(tmp)
