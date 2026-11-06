@@ -15,7 +15,7 @@ import time
 
 import pygame
 
-from . import text
+from . import audio, text
 from .input import InputManager
 
 FPS = 60
@@ -43,6 +43,11 @@ class App:
     def __init__(self, title, size, fullscreen=False):
         pygame.mixer.pre_init(22050, -16, 1, 512)
         pygame.init()
+        if audio.wanted_output():                   # a chosen speaker: reopen the mixer on it
+            try:
+                audio.open_mixer(22050, -16, 1, 512)
+            except pygame.error:
+                pass
         self.title = title
         self.size = size
         self.fullscreen = fullscreen

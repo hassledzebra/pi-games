@@ -4,6 +4,8 @@ import array
 
 import pygame
 
+from . import audio
+
 
 class Sfx:
     def __init__(self, enabled=True):
@@ -13,7 +15,7 @@ class Sfx:
             return
         try:
             if not pygame.mixer.get_init():
-                pygame.mixer.init(22050, -16, 1, 512)
+                audio.open_mixer(22050, -16, 1, 512)
         except pygame.error:
             return
         init = pygame.mixer.get_init()

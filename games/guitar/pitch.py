@@ -212,6 +212,21 @@ class AudioInput:
         return lines
 
     @staticmethod
+    def resolve(want):
+        """A device index from an index, a part of a name, or None (then pick_device's guess is used)."""
+        if want is None or want == "":
+            return None
+        if isinstance(want, int) or str(want).strip().isdigit():
+            return int(want)
+        import sounddevice as sd
+        names = {i: d["name"] for i, d in enumerate(sd.query_devices()) if d["max_input_channels"] > 0}
+        from engine.audio import match
+        name = match(str(want), list(names.values()))
+        if name is None:
+            raise ValueError("no input device matches %r (have: %s)" % (want, ", ".join(names.values()) or "none"))
+        return next(i for i, n in names.items() if n == name)
+
+    @staticmethod
     def pick_device():
         """Prefer a USB guitar interface over a laptop microphone."""
         import sounddevice as sd

@@ -39,8 +39,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Pi Strum - guitar trainer")
     ap.add_argument("--song", help="a .mid file or song folder to put at the top of the list")
     ap.add_argument("--songs", default=os.path.join(ROOT, "songs"), help="song folder (default: songs/)")
-    ap.add_argument("--device", type=int, help="audio input device index (see --list-devices)")
-    ap.add_argument("--list-devices", action="store_true", help="print audio input devices and exit")
+    ap.add_argument("--input", "--device", dest="device", metavar="NAME|INDEX",
+                    help="audio input: part of its name or its index (see --list-devices); default: auto")
+    ap.add_argument("--output", metavar="NAME", help="speaker to play on: part of its name (default: system default)")
+    ap.add_argument("--list-devices", action="store_true", help="print the audio outputs and inputs and exit")
     ap.add_argument("--tuner", action="store_true", help="console pitch test, no window")
     ap.add_argument("--no-input", action="store_true", help="don't open an audio input")
     ap.add_argument("--demo", action="store_true", help="auto-play songs perfectly (shows the UI)")
@@ -58,11 +60,21 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.list_devices:
-        from .pitch import AudioInput
-        print("\n".join(AudioInput.list_devices()) or "no input devices")
+        from engine.audio import output_names
+        print("Outputs (use with --output):")
+        print("\n".join("    " + n for n in output_names()) or "    none found")
+        print("Inputs (use with --input):")
+        try:
+            from .pitch import AudioInput
+            print("\n".join("    " + l for l in AudioInput.list_devices()) or "    none found")
+        except OSError as e:
+            print("    unavailable: %s  (Raspberry Pi: sudo apt install libportaudio2)" % e)
         return
     if args.tuner:
-        tuner_loop(args.device)
+        from engine.audio import wanted_input
+        from .pitch import AudioInput
+        dev = AudioInput.resolve(args.device if args.device is not None else wanted_input())
+        tuner_loop(dev)
         return
     if args.render:
         from . import backing, curriculum
@@ -82,13 +94,14 @@ def main(argv=None):
     from engine.sfx import Sfx
     from .scenes import HEIGHT, WIDTH, Ear, TitleScene
 
+    from engine import audio
+    audio.configure(args.output)
     app = App("Pi Strum", (WIDTH, HEIGHT), fullscreen=on_pi() if args.fullscreen is None else args.fullscreen)
     if not args.mute and pygame.mixer.get_init():           # the engine opens 22 kHz mono; music wants stereo 44.1 kHz
-        pygame.mixer.quit()
         try:
-            pygame.mixer.init(44100, -16, 2, 1024)
+            audio.open_mixer(44100, -16, 2, 1024)
         except pygame.error:
-            pygame.mixer.init(22050, -16, 1, 512)
+            audio.open_mixer(22050, -16, 1, 512)
     app.show_fps = args.fps
     app.settings["songs_dir"] = args.songs
     app.settings["song"] = os.path.abspath(args.song) if args.song else None
@@ -104,7 +117,7 @@ def main(argv=None):
     app.sfx = Sfx(enabled=not args.mute)
     app.sfx.synth("hit", 0.06, lambda t, k: __import__("math").sin(t * 2 * 3.14159 * 880) * (1 - k), 0.25)
     app.sfx.synth("miss", 0.08, lambda t, k: __import__("math").sin(t * 2 * 3.14159 * 160) * (1 - k), 0.25)
-    ear = Ear(device=args.device, enabled=not args.no_input)
+    ear = Ear(device=args.device, enabled=not args.no_input)   # a name or index; Ear falls back to its own guess
     app.settings["ear"] = ear
     try:
         app.run(TitleScene(app))

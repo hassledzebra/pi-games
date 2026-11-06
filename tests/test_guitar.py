@@ -365,10 +365,51 @@ def test_screens(folder):
     pygame.quit()
 
 
+def test_audio_devices():
+    """Choosing speakers and inputs by part of a name."""
+    import json
+    import os
+    from engine import audio
+    names = ["Built-in Audio Stereo", "Built-in Audio Digital Stereo (HDMI)", "UMC202HD 192k Line A"]
+    assert audio.match("hdmi", names) == names[1]
+    assert audio.match("umc", names) == names[2]
+    assert audio.match("Built-in Audio Stereo", names) == names[0]            # exact beats a part of another name
+    assert audio.match("speaker", names) is None
+    logs = []
+    assert audio.resolve_output("nothing", names, log=logs.append) is None and "no output matches" in logs[0]
+    assert audio.resolve_output("", names) is None
+    with tempfile.TemporaryDirectory() as tmp:                                # config file, env var, command line order
+        cfg = os.path.join(tmp, "audio.json")
+        json.dump({"output": "HDMI", "input": "UMC"}, open(cfg, "w"))
+        saved = (audio.CONFIG, os.environ.pop("PI_AUDIO_OUT", None), os.environ.pop("PI_AUDIO_IN", None))
+        try:
+            audio.CONFIG = cfg
+            audio.configure(None)
+            assert audio.wanted_output() == "HDMI" and audio.wanted_input() == "UMC"
+            os.environ["PI_AUDIO_OUT"] = "jack"
+            assert audio.wanted_output() == "jack"
+            audio.configure("Line A")
+            assert audio.wanted_output() == "Line A"
+            audio.CONFIG = os.path.join(tmp, "missing.json")
+            audio.configure(None)
+            del os.environ["PI_AUDIO_OUT"]
+            assert audio.wanted_output() is None and audio.wanted_input() is None
+        finally:
+            audio.CONFIG = saved[0]
+            audio.configure(None)
+            for k, v in zip(("PI_AUDIO_OUT", "PI_AUDIO_IN"), saved[1:]):
+                if v is not None:
+                    os.environ[k] = v
+    from games.guitar.pitch import AudioInput
+    assert AudioInput.resolve(None) is None and AudioInput.resolve("2") == 2 and AudioInput.resolve(3) == 3
+    print("audio devices ok: names, config file, environment and command line order")
+
+
 if __name__ == "__main__":
     test_yin()
     test_tracker()
     test_fingering()
+    test_audio_devices()
     with tempfile.TemporaryDirectory() as tmp:
         songs = test_songs(tmp)
         test_progress(tmp)

@@ -91,6 +91,8 @@ class Ear:
             return
         try:
             from .pitch import AudioInput
+            from engine.audio import wanted_input
+            device = AudioInput.resolve(device if device is not None else wanted_input())
             if device is None:
                 device = AudioInput.pick_device()
             self.input = AudioInput(device)
