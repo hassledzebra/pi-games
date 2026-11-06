@@ -93,7 +93,7 @@ class Monitor:
         self.name = "off"
         self.chain = None
         self.stream = None
-        self.q = collections.deque(maxlen=6)
+        self.q = collections.deque(maxlen=2)      # at most ~23 ms waiting: older blocks are dropped, not played late
         self.lock = threading.Lock()
         self.underruns = 0
 
