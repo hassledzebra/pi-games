@@ -2,6 +2,7 @@
 import math
 import os
 import queue
+import sys
 import threading
 import time
 
@@ -137,6 +138,16 @@ class Ear:
         except Exception:
             pass
 
+    def _present(self):
+        """Is the open interface still on the bus? PortAudio's own list goes stale, so ask a fresh process."""
+        import subprocess
+        code = "import sounddevice as s;print('\\n'.join(d['name'] for d in s.query_devices() if d['max_input_channels']>0))"
+        try:
+            out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=8)
+            return out.returncode != 0 or self.input is None or self.input.name in out.stdout.splitlines()
+        except Exception:
+            return True
+
     @staticmethod
     def _rescan():
         """PortAudio only sees devices that existed when it started; restart it to notice a new one."""
@@ -180,7 +191,7 @@ class Ear:
         return (h[0], h[1]) if h and time.monotonic() - h[2] < seconds else None
 
     def _work(self):
-        last_try = 0.0
+        last_try = last_check = 0.0
         while not self._stop:
             inp = self.input
             if inp is None:                            # not plugged in: look again every couple of seconds
@@ -195,10 +206,16 @@ class Ear:
             try:
                 samples, t_end = inp.q.get(timeout=0.2)
             except queue.Empty:
-                if not inp.stream.active:
+                if not inp.stream.active or time.monotonic() - inp.last_block > 1.0:
                     self._lost()
                     last_try = time.monotonic()
                 continue
+            if time.monotonic() - last_check > 3.0:      # a vanished USB device can leave the stream "running"
+                last_check = time.monotonic()
+                if not self._present():
+                    self._lost()
+                    last_try = time.monotonic()
+                    continue
             for fr in self.tracker.feed(samples, t_end):
                 self.frames.put(fr)
                 if fr.chroma is not None:

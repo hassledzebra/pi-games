@@ -180,6 +180,7 @@ class AudioInput:
         import sounddevice as sd  # lazy: needs PortAudio
         self.rate = rate
         self.q = queue.Queue()
+        self.last_block = time.monotonic()
         self.channel = channel
         self.overflows = 0
         self.monitor = None         # optional fx.Monitor: hear the playing through the speakers
@@ -195,7 +196,8 @@ class AudioInput:
         if status and status.input_overflow:
             self.overflows += 1
         block = indata[:, min(self.channel, indata.shape[1] - 1)].copy()
-        self.q.put((block, time.monotonic()))
+        self.last_block = time.monotonic()
+        self.q.put((block, self.last_block))
         if self.monitor is not None:
             self.monitor.push(block)
 
