@@ -441,6 +441,20 @@ def test_effects_and_live_chord():
         f = np.fft.rfftfreq(len(o), 1 / r)
         return sp[(f > 400) & (f < 3000)].sum() / sp.sum()
     assert highs("lead") > 2 * highs("clean")
+
+    # the cabinet rolls off the fizz above 5 kHz and the gate silences hum between notes
+    h = fx.min_phase_fir(fx.CAB_4X12)
+    H = np.abs(np.fft.rfft(h, 4096))
+    f = np.fft.rfftfreq(4096, 1 / r)
+    at = lambda hz: H[np.argmin(abs(f - hz))]
+    assert at(8000) < 0.05 * at(1000) and at(3000) > 1.2 * at(1000) and at(60) < 0.6 * at(1000)
+    hum = 0.004 * np.sin(2 * np.pi * 60 * np.arange(r) / r)                  # about -50 dBFS of mains hum
+    gate = fx.Gate(-45)
+    out = np.concatenate([gate(hum[i:i + n]) for i in range(0, len(hum) - n, n)])
+    assert np.abs(out[r // 2:]).max() < 0.1 * np.abs(hum).max(), "gate leaves hum"
+    gate = fx.Gate(-45)
+    played = np.concatenate([gate(e2[i:i + n]) for i in range(0, len(e2) - n, n)])
+    assert np.sqrt((played[n * 4:] ** 2).mean()) > 0.9 * np.sqrt((e2[n * 4:len(played)] ** 2).mean()), "gate eats the note"
     # reverb leaves a tail after the note stops
     chain = fx.Chain("space")
     chain.process(e2[:n])
