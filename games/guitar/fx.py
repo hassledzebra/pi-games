@@ -9,6 +9,8 @@ the speakers would feed back, so use a direct cable or headphones.
     E                  cycle the effect while playing
 """
 import collections
+import os
+import time
 import math
 import threading
 
@@ -179,7 +181,10 @@ class Monitor:
         self.name = "off"
         self.chain = None
         self.stream = None
-        self.q = collections.deque(maxlen=2)      # at most ~23 ms waiting: older blocks are dropped, not played late
+        self.buf = np.zeros((0, 2), np.float32)   # processed samples waiting for the output clock
+        self.low, self.high = block * 2, block * 4  # input and output clocks drift: hold ~2-4 blocks, trim by samples
+        self.primed = False
+        self.drops = 0
         self.lock = threading.Lock()
         self.underruns = 0
 
@@ -188,7 +193,8 @@ class Monitor:
         if name not in NAMES:
             name = "off"
         with self.lock:
-            self.q.clear()
+            self.buf = self.buf[:0]
+            self.primed = False
             self.name = name
             self.chain = Chain(name, self.rate, self.block) if name != "off" else None
         if name == "off":
@@ -224,19 +230,33 @@ class Monitor:
     def push(self, block):
         chain = self.chain
         if chain is not None:
+            t0 = time.perf_counter()
             out = chain.process(block)
+            self.cost = max(getattr(self, "cost", 0.0), time.perf_counter() - t0)
+            self.pushes = getattr(self, "pushes", 0) + 1
+            if os.environ.get("PI_FX_DEBUG") and self.pushes % 430 == 0:
+                self.log("fx: underruns %d trims %d worst block %.1f ms of %.1f" % (
+                    self.underruns, self.drops, self.cost * 1e3, self.block / self.rate * 1e3))
+                self.cost = 0.0
             with self.lock:
-                self.q.append(out)
+                buf = np.concatenate((self.buf, out))
+                if len(buf) > self.high:                  # output clock slower: skip a few samples, not a whole block
+                    self.drops += 1
+                    buf = buf[len(buf) - self.low:]
+                self.buf = buf
 
     def _pull(self, outdata, frames, time_info, status):
         with self.lock:
-            block = self.q.popleft() if self.q else None
-        if block is None or len(block) != frames:
-            outdata.fill(0)
-            if block is None:
+            if not self.primed and len(self.buf) >= self.low:
+                self.primed = True
+            if self.primed and len(self.buf) >= frames:
+                outdata[:] = self.buf[:frames]
+                self.buf = self.buf[frames:]
+                return
+            if self.primed:                               # ran dry: refill to the cushion before playing again
                 self.underruns += 1
-        else:
-            outdata[:] = block
+                self.primed = False
+        outdata.fill(0)
 
     def close(self):
         self._close()

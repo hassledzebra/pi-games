@@ -188,7 +188,7 @@ class AudioInput:
         channels = max(1, min(2, int(info["max_input_channels"])))
         self.name = info["name"]
         self.stream = sd.InputStream(device=device, samplerate=rate, channels=channels,
-                                     blocksize=blocksize, dtype="float32", callback=self._cb)
+                                     blocksize=blocksize, dtype="float32", latency="low", callback=self._cb)
         self.stream.start()
 
     def _cb(self, indata, frames, time_info, status):

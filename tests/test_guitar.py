@@ -462,12 +462,21 @@ def test_effects_and_live_chord():
     assert np.abs(tail).max() > 0.01
     mon = fx.Monitor(log=lambda *a: None)
     mon.chain, mon.name = fx.Chain("crunch"), "crunch"
-    mon.push(e2[:n])
     buf = np.zeros((n, 2), dtype=np.float32)
+    mon.push(e2[:n])
+    mon._pull(buf, n, None, None)                      # still filling the cushion: silence, not an underrun
+    assert np.abs(buf).max() == 0 and mon.underruns == 0
+    for i in range(1, 4):
+        mon.push(e2[i * n:(i + 1) * n])
+    assert len(mon.buf) <= mon.high and mon.drops == 0
     mon._pull(buf, n, None, None)
     assert np.abs(buf).max() > 0.01
-    mon._pull(buf, n, None, None)                      # nothing queued: silence, counted as an underrun
+    for _ in range(4):                                 # runs dry: silence, counted once, then refills
+        mon._pull(buf, n, None, None)
     assert np.abs(buf).max() == 0 and mon.underruns == 1
+    for i in range(8):                                 # output clock stalls: buffer is trimmed, never grows
+        mon.push(e2[i * n:(i + 1) * n])
+    assert len(mon.buf) <= mon.high and mon.drops > 0
     assert [fx.NAMES[0], fx.NAMES[1]] == ["off", "clean"]
     # a G strum (G2 B2 D3 G3 B3 G4 with harmonics) is named G
     from games.guitar.chords import ChromaAnalyser
