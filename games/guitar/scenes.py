@@ -603,7 +603,7 @@ class PlayScene(Scene):
             else:
                 pygame.draw.polygon(surface, col, [(x - 6, strum_y + 2), (x + 6, strum_y + 2), (x, strum_y + 14)])
         pygame.draw.line(surface, WHITE, (now_x, lane_top - 14), (now_x, strum_y + 24), 2)
-        text.draw(surface, "strum", 12, GREY, (174, strum_y + 2), align="left")
+        text.draw(surface, "strum arrows: pointing down = downstroke (thick to thin strings), pointing up = upstroke", 12, GREY, (174, strum_y + 32), align="left")
         if self.flash and t - self.flash[0] < 0.35:
             _, i, verdict = self.flash
             text.draw(surface, "HIT" if verdict == HIT else "MISS", 20, GREEN if verdict == HIT else RED, (now_x + 30, lane_top - 30))
